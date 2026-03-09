@@ -1,17 +1,17 @@
-import { askAI } from "../services/ai.service.js";
+import { generateAIResponse } from "../services/ai.service.js";
 
-export const chatWithAI = async (req, res) => {
-  const { message } = req.body;
-
-  if (!message) {
-    return res.status(400).json({ error: "Thiếu message" });
-  }
-
+export const chatWithAI = async (req, res, next) => {
   try {
-    const reply = await askAI(message);
+    const { messages } = req.body;
+
+    if (!messages || !Array.isArray(messages)) {
+      return res.status(400).json({ error: "Invalid messages format" });
+    }
+
+    const reply = await generateAIResponse(messages);
+
     res.json({ reply });
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: "AI không trả lời được" });
+  } catch (error) {
+    next(error);
   }
 };

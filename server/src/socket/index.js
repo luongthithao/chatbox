@@ -1,19 +1,7 @@
-import express from "express";
-import cors from "cors";
-import dotenv from "dotenv";
-import messageRoutes from "./routes/message.routes.js";
+import app from "./app.js";
 
-dotenv.config();
+const PORT = 5000;
 
-const app = express();
-
-app.use(cors());
-app.use(express.json());
-
-app.use("/api/messages", messageRoutes);
-
-const PORT = process.env.PORT || 5000;
-
-app.listen(PORT, "0.0.0.0", () => {
-  console.log(`Server running on http://localhost:${PORT}`);
+app.listen(PORT, () => {
+  console.log(`🚀 Server running at http://localhost:${PORT}`);
 });

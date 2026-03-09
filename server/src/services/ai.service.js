@@ -1,17 +1,42 @@
-import OpenAI from "openai";
+import axios from "axios";
 
-const client = new OpenAI({
-  apiKey: process.env.OPENAI_API_KEY,
-});
+const OLLAMA_URL = "http://localhost:11434/api/generate";
+const MODEL = "llama3:8b";
 
-export async function chatWithAI(message) {
-  const response = await client.chat.completions.create({
-    model: "gpt-3.5-turbo",
-    messages: [
-      { role: "system", content: "Bạn là trợ lý AI thân thiện." },
-      { role: "user", content: message }
-    ],
-  });
+const SYSTEM_PROMPT = `
+Bạn là trợ lý AI thông minh, trả lời:
+- Ngắn gọn
+- Chính xác
+- Trực tiếp vào vấn đề
+- Nếu không chắc thì nói rõ
+- Trả lời bằng tiếng Việt
+`;
 
-  return response.choices[0].message.content;
-}
+export const generateAIResponse = async (message, history = []) => {
+  const conversation = `
+${SYSTEM_PROMPT}
+
+Lịch sử:
+${history.map(m => `${m.role}: ${m.content}`).join("\n")}
+
+Người dùng: ${message}
+AI:
+`;
+
+  try {
+    const { data } = await axios.post(OLLAMA_URL, {
+      model: MODEL,
+      prompt: conversation,
+      stream: false,
+      options: {
+        temperature: 0.3,   // ↓ giảm bịa chuyện
+        top_p: 0.9
+      }
+    });
+
+    return data.response?.trim();
+
+  } catch (error) {
+    throw new Error("AI service unavailable");
+  }
+};

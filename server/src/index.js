@@ -1,10 +1,10 @@
 import app from "./app.js";
-import aiRoutes from "./routes/ai.routes.js";
+import validateEnv, { getEnv } from "./config/env.js";
 
-const PORT = 5000;
-
-app.use("/api", aiRoutes);
+validateEnv();
+const { PORT } = getEnv();
 
 app.listen(PORT, () => {
   console.log(`🚀 Server running at http://localhost:${PORT}`);
 });
+
