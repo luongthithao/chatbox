@@ -1,5 +1,6 @@
 import pg from "pg";
 import { getEnv } from "./env.js";
+import { appSchema } from "./schema.js";
 
 const { Pool } = pg;
 const env = getEnv();
@@ -11,5 +12,9 @@ const pool = new Pool({
   password: env.DB_PASSWORD,
   port: env.DB_PORT,
 });
+
+export const initializeDatabase = async () => {
+  await pool.query(appSchema);
+};
 
 export default pool;

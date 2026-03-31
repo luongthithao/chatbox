@@ -1,257 +1,493 @@
-import { useState, useRef, useEffect } from "react";
+import { useEffect, useRef, useState } from "react";
+import { conversationApi } from "../utils/api";
 import "./ChatBox.css";
 
-const API_URL = "http://localhost:11434/api/generate";
-const MODEL_NAME = "llama3:8b";
-const MAX_HISTORY = 30;
-const CONTEXT_HISTORY = 6;
-const REQUEST_TIMEOUT = 30000;
+const INPUT_MIN_HEIGHT = 56;
+const INPUT_MAX_HEIGHT = 180;
 
-const SYSTEM_PROMPT = `
-Bạn là trợ lý AI tiếng Việt.
-
-Nguyên tắc trả lời:
-- Luôn trả lời bằng tiếng Việt tự nhiên, dễ hiểu.
-- Trả lời đúng trọng tâm, không lan man.
-- Ưu tiên hiểu câu hỏi theo ngữ cảnh người Việt Nam.
-- Với câu hỏi về kiến thức phổ thông, hãy hiểu theo chương trình học phổ thông Việt Nam.
-- Nếu người dùng yêu cầu liệt kê, hãy liệt kê đúng số lượng họ yêu cầu.
-- Không tự ý thêm kiến thức ngoài chủ đề khi chưa cần.
-- Nếu câu hỏi chưa rõ, chỉ hỏi lại 1 câu ngắn để làm rõ.
-- Không bịa thông tin. Nếu không chắc, hãy nói rõ là không chắc.
-- Khi trả lời dạng danh sách, xuống dòng rõ ràng, dễ đọc.
-`;
-
-const createMessage = (role, content, extra = {}) => ({
-  id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+const createTemporaryMessage = (role, content) => ({
+  id: `temp-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
   role,
   content,
-  ...extra,
+  isTemporary: true,
+  createdAt: new Date().toISOString(),
 });
 
-const normalizeUserInput = (text) => {
-  const q = text.trim();
-  const lowerQ = q.toLowerCase();
-
-  if (lowerQ.includes("hằng đẳng thức đáng nhớ")) {
-    return "Hãy liệt kê đúng 7 hằng đẳng thức đáng nhớ trong đại số phổ thông Việt Nam, viết đúng công thức, trình bày theo danh sách đánh số rõ ràng, không thêm kiến thức ngoài yêu cầu.";
+const formatMessageTime = (value) => {
+  if (!value) {
+    return "";
   }
 
-  if (lowerQ.includes("phương trình bậc 2") || lowerQ.includes("phương trình bậc hai")) {
-    return "Hãy giải thích hoặc trình bày về phương trình bậc hai theo kiến thức toán phổ thông Việt Nam, viết ngắn gọn, dễ hiểu, đúng trọng tâm.";
+  const date = new Date(value);
+
+  if (Number.isNaN(date.getTime())) {
+    return "";
   }
 
-  if (lowerQ.includes("văn nghị luận")) {
-    return "Hãy trả lời theo ngữ cảnh môn Ngữ văn phổ thông Việt Nam, trình bày rõ ràng, đúng trọng tâm.";
+  return new Intl.DateTimeFormat("vi-VN", {
+    hour: "2-digit",
+    minute: "2-digit",
+    day: "2-digit",
+    month: "2-digit",
+  }).format(date);
+};
+
+const formatDateDivider = (value) => {
+  if (!value) {
+    return "";
   }
 
-  if (lowerQ.startsWith("viết cho tôi ") && lowerQ.includes(" công thức")) {
-    return `${q}. Hãy trình bày theo danh sách, xuống dòng rõ ràng, không lan man.`;
+  const date = new Date(value);
+
+  if (Number.isNaN(date.getTime())) {
+    return "";
   }
 
-  if (lowerQ.startsWith("liệt kê ") || lowerQ.startsWith("nêu ")) {
-    return `${q}. Hãy trả lời đúng số lượng yêu cầu, trình bày thành danh sách rõ ràng.`;
+  return new Intl.DateTimeFormat("vi-VN", {
+    weekday: "long",
+    day: "2-digit",
+    month: "2-digit",
+    year: "numeric",
+  }).format(date);
+};
+
+const getDayKey = (value) => {
+  const date = new Date(value);
+
+  if (Number.isNaN(date.getTime())) {
+    return "invalid-date";
   }
 
-  return q;
+  return `${date.getFullYear()}-${date.getMonth()}-${date.getDate()}`;
+};
+
+const buildMessageItems = (messages) => {
+  const items = [];
+  let currentDayKey = null;
+
+  for (const message of messages) {
+    const nextDayKey = getDayKey(message.createdAt);
+
+    if (nextDayKey !== currentDayKey) {
+      currentDayKey = nextDayKey;
+      items.push({
+        type: "date",
+        id: `date-${currentDayKey}`,
+        label: formatDateDivider(message.createdAt),
+      });
+    }
+
+    items.push({
+      type: "message",
+      message,
+    });
+  }
+
+  return items;
 };
 
 export default function ChatBox() {
-  const [messages, setMessages] = useState(() => {
-    try {
-      const saved = localStorage.getItem("chat_history");
-      const parsed = saved ? JSON.parse(saved) : [];
-      return Array.isArray(parsed) ? parsed.slice(-MAX_HISTORY) : [];
-    } catch {
-      return [];
-    }
-  });
-
+  const [conversations, setConversations] = useState([]);
+  const [activeConversationId, setActiveConversationId] = useState(null);
+  const [messages, setMessages] = useState([]);
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
+  const [bootstrapping, setBootstrapping] = useState(true);
   const [error, setError] = useState("");
+  const [copiedMessageId, setCopiedMessageId] = useState(null);
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
 
   const chatEndRef = useRef(null);
-  const abortRef = useRef(null);
+  const textareaRef = useRef(null);
 
   useEffect(() => {
-    chatEndRef.current?.scrollIntoView({ behavior: "smooth" });
-    localStorage.setItem(
-      "chat_history",
-      JSON.stringify(messages.slice(-MAX_HISTORY))
-    );
+    chatEndRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
   }, [messages]);
 
   useEffect(() => {
-    return () => {
-      abortRef.current?.abort();
+    const textarea = textareaRef.current;
+
+    if (!textarea) {
+      return;
+    }
+
+    textarea.style.height = `${INPUT_MIN_HEIGHT}px`;
+    textarea.style.height = `${Math.min(textarea.scrollHeight, INPUT_MAX_HEIGHT)}px`;
+  }, [input]);
+
+  useEffect(() => {
+    if (!copiedMessageId) {
+      return undefined;
+    }
+
+    const timeoutId = window.setTimeout(() => {
+      setCopiedMessageId(null);
+    }, 1800);
+
+    return () => window.clearTimeout(timeoutId);
+  }, [copiedMessageId]);
+
+  const openConversation = async (conversationId) => {
+    try {
+      setError("");
+      setActiveConversationId(conversationId);
+      const data = await conversationApi.get(conversationId);
+      setMessages(data.conversation.messages || []);
+      setConversations((prev) =>
+        prev.map((conversation) =>
+          conversation.id === conversationId
+            ? {
+                ...conversation,
+                title: data.conversation.title,
+                createdAt: data.conversation.createdAt,
+                updatedAt: data.conversation.updatedAt,
+              }
+            : conversation
+        )
+      );
+    } catch (err) {
+      setError(err.message || "Không thể mở cuộc trò chuyện.");
+    }
+  };
+
+  useEffect(() => {
+    const bootstrap = async () => {
+      try {
+        const data = await conversationApi.list();
+        const items = data.conversations || [];
+        setConversations(items);
+
+        if (items.length > 0) {
+          await openConversation(items[0].id);
+        } else {
+          const created = await conversationApi.create();
+          const conversation = created.conversation;
+          setConversations([conversation]);
+          setActiveConversationId(conversation.id);
+          setMessages([]);
+        }
+      } catch (err) {
+        setError(err.message || "Không thể tải dữ liệu hội thoại.");
+      } finally {
+        setBootstrapping(false);
+      }
     };
+
+    bootstrap();
   }, []);
 
-  const buildPrompt = (history, currentInput) => {
-    const conversation = history
-      .slice(-CONTEXT_HISTORY)
-      .map((msg) =>
-        msg.role === "user"
-          ? `Người dùng: ${msg.content}`
-          : `AI: ${msg.content}`
-      )
-      .join("\n");
+  const handleCreateConversation = async () => {
+    if (loading) {
+      return;
+    }
 
-    return `
-${SYSTEM_PROMPT}
+    try {
+      setError("");
+      const data = await conversationApi.create();
+      const conversation = data.conversation;
+      setConversations((prev) => [conversation, ...prev]);
+      setActiveConversationId(conversation.id);
+      setMessages([]);
+    } catch (err) {
+      setError(err.message || "Không thể tạo cuộc trò chuyện mới.");
+    }
+  };
 
-Lịch sử hội thoại gần đây:
-${conversation}
+  const handleRenameConversation = async (conversation) => {
+    const nextTitle = window.prompt("Nhập tên mới cho cuộc trò chuyện", conversation.title);
 
-Yêu cầu mới của người dùng:
-Người dùng: ${currentInput}
+    if (!nextTitle || nextTitle.trim() === conversation.title) {
+      return;
+    }
 
-Hãy trả lời đúng yêu cầu mới nhất của người dùng.
-AI:
-`.trim();
+    try {
+      setError("");
+      const data = await conversationApi.update(conversation.id, nextTitle.trim());
+      setConversations((prev) =>
+        prev.map((item) =>
+          item.id === conversation.id
+            ? {
+                ...item,
+                title: data.conversation.title,
+                updatedAt: data.conversation.updatedAt,
+              }
+            : item
+        )
+      );
+
+      if (activeConversationId === conversation.id) {
+        setMessages(data.conversation.messages || []);
+      }
+    } catch (err) {
+      setError(err.message || "Không thể đổi tên cuộc trò chuyện.");
+    }
+  };
+
+  const handleDeleteConversation = async (conversationId) => {
+    if (loading || !window.confirm("Xóa cuộc trò chuyện này?")) {
+      return;
+    }
+
+    try {
+      setError("");
+      await conversationApi.remove(conversationId);
+      const remaining = conversations.filter(
+        (conversation) => conversation.id !== conversationId
+      );
+      setConversations(remaining);
+
+      if (activeConversationId === conversationId) {
+        if (remaining.length > 0) {
+          await openConversation(remaining[0].id);
+        } else {
+          const created = await conversationApi.create();
+          const conversation = created.conversation;
+          setConversations([conversation]);
+          setActiveConversationId(conversation.id);
+          setMessages([]);
+        }
+      }
+    } catch (err) {
+      setError(err.message || "Không thể xóa cuộc trò chuyện.");
+    }
+  };
+
+  const handleCopyMessage = async (message) => {
+    try {
+      await navigator.clipboard.writeText(message.content);
+      setCopiedMessageId(message.id);
+    } catch {
+      setError("Không thể sao chép nội dung tin nhắn.");
+    }
   };
 
   const sendMessage = async () => {
     const trimmed = input.trim();
-    if (!trimmed || loading) return;
+
+    if (!trimmed || loading || !activeConversationId) {
+      return;
+    }
 
     setError("");
-
-    const normalizedInput = normalizeUserInput(trimmed);
-
-    const userMessage = createMessage("user", trimmed);
-    const thinkingMessage = createMessage("ai", "Đang trả lời...", {
-      loading: true,
-    });
-
-    setMessages((prev) => [...prev, userMessage, thinkingMessage]);
-    setInput("");
     setLoading(true);
+    setInput("");
 
-    const controller = new AbortController();
-    abortRef.current = controller;
+    const optimisticUserMessage = createTemporaryMessage("user", trimmed);
+    const thinkingMessage = createTemporaryMessage("ai", "Đang suy nghĩ...");
 
-    const timeoutId = setTimeout(() => {
-      controller.abort();
-    }, REQUEST_TIMEOUT);
+    setMessages((prev) => [...prev, optimisticUserMessage, thinkingMessage]);
 
     try {
-      const promptHistory = [...messages, userMessage];
-      const prompt = buildPrompt(promptHistory, normalizedInput);
+      const data = await conversationApi.sendMessage(activeConversationId, trimmed);
+      setMessages(data.conversation.messages || []);
+      setConversations((prev) => {
+        const withoutActive = prev.filter(
+          (conversation) => conversation.id !== data.conversation.id
+        );
 
-      const response = await fetch(API_URL, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        signal: controller.signal,
-        body: JSON.stringify({
-          model: MODEL_NAME,
-          prompt,
-          stream: false,
-          temperature: 0.2,
-          num_predict: 220,
-        }),
+        return [
+          {
+            id: data.conversation.id,
+            title: data.conversation.title,
+            createdAt: data.conversation.createdAt,
+            updatedAt: data.conversation.updatedAt,
+            lastMessage: data.aiMessage.content,
+          },
+          ...withoutActive,
+        ];
       });
-
-      if (!response.ok) {
-        throw new Error(`AI server error: ${response.status}`);
-      }
-
-      const data = await response.json();
-      const aiText = data.response?.trim() || "AI không có phản hồi.";
-
-      setMessages((prev) =>
-        prev.map((msg) =>
-          msg.id === thinkingMessage.id
-            ? { ...msg, content: aiText, loading: false }
-            : msg
-        )
-      );
     } catch (err) {
-      const errorMessage =
-        err.name === "AbortError"
-          ? "Hết thời gian chờ phản hồi từ AI."
-          : "Không thể kết nối AI server 😭";
-
-      console.error("Chat error:", err);
-      setError(errorMessage);
-
+      const message = err.message || "Không thể gửi tin nhắn.";
+      setError(message);
       setMessages((prev) =>
-        prev.map((msg) =>
-          msg.id === thinkingMessage.id
-            ? { ...msg, content: errorMessage, loading: false, error: true }
-            : msg
+        prev.map((item) =>
+          item.id === thinkingMessage.id
+            ? {
+                ...item,
+                content: message,
+                error: true,
+              }
+            : item
         )
       );
     } finally {
-      clearTimeout(timeoutId);
-      abortRef.current = null;
       setLoading(false);
+      textareaRef.current?.focus();
     }
   };
 
-  const handleKeyDown = (e) => {
-    if (e.key === "Enter" && !e.shiftKey) {
-      e.preventDefault();
+  const handleKeyDown = (event) => {
+    if (event.key === "Enter" && !event.shiftKey) {
+      event.preventDefault();
       sendMessage();
     }
   };
 
-  const clearChat = () => {
-    abortRef.current?.abort();
-    localStorage.removeItem("chat_history");
-    setMessages([]);
-    setInput("");
-    setError("");
-    setLoading(false);
-  };
+  const activeConversation = conversations.find(
+    (conversation) => conversation.id === activeConversationId
+  );
+
+  const messageItems = buildMessageItems(messages);
 
   return (
-    <div className="chat-wrapper">
-      <div className="chat-box">
-        <div className="chat-header">
-          AI 🐑
-          <button onClick={clearChat} className="clear-btn">
-            Xóa chat
-          </button>
+    <div className={`chat-layout ${sidebarCollapsed ? "sidebar-collapsed" : ""}`}>
+      <aside className="chat-sidebar">
+        <div className="sidebar-header">
+          <div className="sidebar-heading">
+            <p className="sidebar-eyebrow">Trợ lý AI</p>
+            <h1>{sidebarCollapsed ? "Chat" : "Đoạn chat"}</h1>
+          </div>
+          <div className="sidebar-top-actions">
+            <button
+              type="button"
+              className="sidebar-toggle-btn"
+              onClick={() => setSidebarCollapsed((prev) => !prev)}
+              aria-label={sidebarCollapsed ? "Mở rộng thanh bên" : "Thu gọn thanh bên"}
+              title={sidebarCollapsed ? "Mở rộng thanh bên" : "Thu gọn thanh bên"}
+            >
+              {sidebarCollapsed ? "»" : "«"}
+            </button>
+            <button type="button" className="new-chat-btn" onClick={handleCreateConversation}>
+              {sidebarCollapsed ? "+" : "Cuộc trò chuyện mới"}
+            </button>
+          </div>
         </div>
 
-        <div className="chat-body">
-          {messages.length === 0 && (
-            <div className="message ai">
-              Xin chào, bạn muốn mình giúp gì hôm nay?
-            </div>
-          )}
-
-          {messages.map((msg) => (
+        <div className="conversation-list">
+          {conversations.map((conversation) => (
             <div
-              key={msg.id}
-              className={`message ${msg.role} ${msg.error ? "error" : ""}`}
+              key={conversation.id}
+              className={`conversation-item ${
+                conversation.id === activeConversationId ? "active" : ""
+              }`}
             >
-              {msg.content}
+              <button
+                type="button"
+                className="conversation-main"
+                onClick={() => openConversation(conversation.id)}
+                title={conversation.title}
+              >
+                <span className="conversation-title">{conversation.title}</span>
+                {!sidebarCollapsed && (
+                  <span className="conversation-preview">
+                    {conversation.lastMessage || "Chưa có tin nhắn"}
+                  </span>
+                )}
+              </button>
+              {!sidebarCollapsed && (
+                <div className="conversation-actions">
+                  <button
+                    type="button"
+                    className="conversation-action"
+                    onClick={() => handleRenameConversation(conversation)}
+                    disabled={loading}
+                  >
+                    Sửa
+                  </button>
+                  <button
+                    type="button"
+                    className="conversation-action danger"
+                    onClick={() => handleDeleteConversation(conversation.id)}
+                    disabled={loading}
+                  >
+                    Xóa
+                  </button>
+                </div>
+              )}
             </div>
           ))}
+        </div>
+      </aside>
+
+      <section className="chat-panel">
+        <header className="chat-header">
+          <div>
+            <p className="sidebar-eyebrow">Không gian chat</p>
+            <h2>{activeConversation?.title || "Đang tải..."}</h2>
+          </div>
+          <div className="chat-meta">
+            <span>{loading ? "AI đang phản hồi" : "Sẵn sàng"}</span>
+            <span>Enter để gửi • Shift+Enter xuống dòng</span>
+          </div>
+        </header>
+
+        <div className="chat-body">
+          {bootstrapping ? (
+            <div className="message-group">
+              <div className="message ai message-loading">Đang tải cuộc trò chuyện...</div>
+            </div>
+          ) : messages.length === 0 ? (
+            <div className="message-group">
+              <div className="message ai">
+                Bắt đầu một câu hỏi mới để tạo lịch sử như ChatGPT.
+              </div>
+            </div>
+          ) : (
+            messageItems.map((item) => {
+              if (item.type === "date") {
+                return (
+                  <div key={item.id} className="date-divider">
+                    <span>{item.label}</span>
+                  </div>
+                );
+              }
+
+              const { message } = item;
+
+              return (
+                <div
+                  key={message.id}
+                  className={`message-group ${message.role === "user" ? "user" : "ai"}`}
+                >
+                  <div className="message-stack">
+                    <div
+                      className={`message ${message.role} ${message.error ? "error" : ""} ${
+                        message.isTemporary ? "message-loading" : ""
+                      }`}
+                    >
+                      {message.content}
+                    </div>
+                    {message.role === "ai" && !message.isTemporary && (
+                      <button
+                        type="button"
+                        className="copy-message-btn"
+                        onClick={() => handleCopyMessage(message)}
+                      >
+                        {copiedMessageId === message.id ? "Đã chép" : "Sao chép"}
+                      </button>
+                    )}
+                  </div>
+                  <div className="message-time">{formatMessageTime(message.createdAt)}</div>
+                </div>
+              );
+            })
+          )}
 
           <div ref={chatEndRef} />
         </div>
 
-        <div className="chat-input">
-          <input
-            type="text"
-            value={input}
-            placeholder="Nhập câu hỏi..."
-            onChange={(e) => setInput(e.target.value)}
-            onKeyDown={handleKeyDown}
-          />
-          <button onClick={sendMessage} disabled={loading || !input.trim()}>
-            {loading ? "Đang trả lời..." : "Gửi"}
-          </button>
-        </div>
+        <div className="chat-input-shell">
+          <div className="chat-input">
+            <textarea
+              ref={textareaRef}
+              value={input}
+              placeholder="Nhập câu hỏi..."
+              onChange={(event) => setInput(event.target.value)}
+              onKeyDown={handleKeyDown}
+              rows={1}
+            />
+            <button
+              onClick={sendMessage}
+              disabled={loading || !input.trim() || !activeConversationId}
+              type="button"
+            >
+              {loading ? "Đang gửi..." : "Gửi"}
+            </button>
+          </div>
 
-        {error && <div className="chat-error">{error}</div>}
-      </div>
+          {error && <div className="chat-error">{error}</div>}
+        </div>
+      </section>
     </div>
   );
 }
